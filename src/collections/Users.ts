@@ -1,12 +1,13 @@
 import type { CollectionConfig, FieldHook } from 'payload';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
+import { env } from '../env';
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
 });
 
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'default_secret';
+const ENCRYPTION_KEY = env.dbEncryptionKey;
 
 const encrypt: FieldHook = async ({ value }: { value?: string }) => {
   if (typeof value !== 'string') return value;

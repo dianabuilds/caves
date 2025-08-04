@@ -4,8 +4,8 @@ import cookieParser from 'cookie-parser';
 import { randomBytes } from 'crypto';
 import { SiweMessage } from 'siwe';
 import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
 import config from '../payload.config';
+import { env } from './env';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -14,14 +14,13 @@ import sgMail from '@sendgrid/mail';
 import { createClient } from 'redis';
 import archiver from 'archiver';
 
-dotenv.config();
-sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
+sgMail.setApiKey(env.sendgridApiKey);
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
 });
 
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'default_secret';
+const ENCRYPTION_KEY = env.dbEncryptionKey;
 
 const encryptValue = async (value: string): Promise<string> => {
   const res = await pool.query(
@@ -59,7 +58,13 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-const redis = createClient({ url: process.env.REDIS_URL });
+const staticDir = path.join(__dirname, 'public');
+app.use(express.static(staticDir));
+app.get('/privacy', (_req, res) => {
+  res.sendFile(path.join(staticDir, 'privacy.html'));
+});
+
+const redis = createClient({ url: env.redisUrl });
 redis.connect().catch(() => {});
 
 const RATE_LIMIT = 20;
@@ -105,7 +110,7 @@ const authenticate = async (
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwt_secret') as {
+    const decoded = jwt.verify(token, env.jwtSecret) as {
       address: string;
     };
     const { docs } = await payload.find({
@@ -130,7 +135,7 @@ const optionalAuthenticate = async (
   if (authHeader) {
     const token = authHeader.split(' ')[1];
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwt_secret') as {
+      const decoded = jwt.verify(token, env.jwtSecret) as {
         address: string;
       };
       const { docs } = await payload.find({
@@ -213,7 +218,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     });
     const token = jwt.sign(
       { address: walletAddress },
-      process.env.JWT_SECRET || 'jwt_secret',
+      env.jwtSecret,
       { expiresIn: '15m' },
     );
     await logUserEvent(req, String(user.id), 'register');
@@ -249,13 +254,41 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     userSessions.get(userId)!.add(sessionId);
     const token = jwt.sign(
       { address: data.address },
-      process.env.JWT_SECRET || 'jwt_secret',
+      env.jwtSecret,
       { expiresIn: '15m' }
     );
     res.cookie('sid', sessionId, { httpOnly: true, secure: true, sameSite: 'lax' });
     await logUserEvent(req, userId, 'login');
     res.json({ token });
   } catch (err) {
+    res.status(400).json({ error: 'Invalid login' });
+  }
+});
+
+app.post('/api/auth/login-password', async (req: Request, res: Response) => {
+  const { email, passwordHash } = req.body;
+  if (typeof email !== 'string' || typeof passwordHash !== 'string') {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  try {
+    const encryptedEmail = await encryptValue(email);
+    const { docs } = await payload.find({
+      collection: 'users',
+      where: { email: { equals: encryptedEmail } },
+      limit: 1,
+    });
+    if (!docs.length || docs[0].passwordHash !== passwordHash) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const user = docs[0];
+    const token = jwt.sign(
+      { address: user.walletAddress },
+      env.jwtSecret,
+      { expiresIn: '15m' },
+    );
+    await logUserEvent(req, String(user.id), 'login_password');
+    res.json({ token, user: sanitizeUser(user, true) });
+  } catch {
     res.status(400).json({ error: 'Invalid login' });
   }
 });
@@ -322,7 +355,7 @@ app.post('/api/auth/forgot', async (req: Request, res: Response) => {
       try {
         await sgMail.send({
           to: user.email,
-          from: process.env.SENDGRID_FROM || 'no-reply@example.com',
+          from: env.sendgridFrom,
           subject: 'Password Reset',
           text: `Your reset token: ${token}`,
         });

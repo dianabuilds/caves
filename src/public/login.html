@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Login</title>
+  </head>
+  <body>
+    <div id="data-consent">Мы обрабатываем данные. <button id="consent-ok">OK</button></div>
+    <h1>Login</h1>
+    <form id="pw">
+      <input id="email" type="email" placeholder="Email" required />
+      <input id="password" type="password" placeholder="Password" required />
+      <button type="submit">Login with Password</button>
+    </form>
+    <button id="wallet-btn">Login with Wallet</button>
+    <script src="/consent.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/siwe@3.0.0/dist/index.min.js"></script>
+    <script>
+      async function hash(val) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(val));
+        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+      document.getElementById('pw').addEventListener('submit', async e => {
+        e.preventDefault();
+        const body = {
+          email: email.value,
+          passwordHash: await hash(password.value)
+        };
+        const res = await fetch('/api/auth/login-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (data.token) {
+          localStorage.setItem('token', data.token);
+          window.location = '/profile.html';
+        } else {
+          alert('Login failed');
+        }
+      });
+      document.getElementById('wallet-btn').addEventListener('click', async () => {
+        try {
+          const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+          const address = accounts[0];
+          const nonceRes = await fetch('/api/auth/nonce');
+          const { nonce } = await nonceRes.json();
+          const message = new Siwe.SiweMessage({
+            domain: window.location.host,
+            address,
+            statement: 'Sign in',
+            uri: window.location.origin,
+            version: '1',
+            chainId: 1,
+            nonce
+          }).prepareMessage();
+          const signature = await window.ethereum.request({ method: 'personal_sign', params: [message, address] });
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, signature })
+          });
+          const data = await res.json();
+          if (data.token) {
+            localStorage.setItem('token', data.token);
+            window.location = '/profile.html';
+          } else {
+            alert('Wallet login failed');
+          }
+        } catch (err) {
+          alert('Wallet login failed');
+        }
+      });
+    </script>
+  </body>
+</html>

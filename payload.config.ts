@@ -1,12 +1,10 @@
 import { buildConfig } from 'payload/config';
-import dotenv from 'dotenv';
 import { Pool } from 'pg';
 import Users from './src/collections/Users';
-
-dotenv.config();
+import { env } from './src/env';
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
 });
 
 // Ensure pgcrypto extension for field-level encryption
@@ -19,8 +17,8 @@ export default buildConfig({
   db: {
     pool,
   },
-  secret: process.env.PAYLOAD_SECRET || '',
+  secret: env.payloadSecret,
   expressSession: {
-    secret: process.env.SESSION_SECRET || '',
+    secret: env.sessionSecret,
   },
 });

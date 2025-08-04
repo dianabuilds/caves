@@ -1,4 +1,17 @@
 node_modules
 .DS_Store
 dist
+# Ignore environment files
+.env
+.env.*
+!.env.example
+
+# Logs and coverage
+*.log
+coverage
+playwright-report
+test-results
+
+# Uploaded files
+uploads
 

@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Register</title>
+  </head>
+  <body>
+    <div id="data-consent">Мы обрабатываем данные. <button id="consent-ok">OK</button></div>
+    <h1>Register</h1>
+    <form id="reg">
+      <input id="username" placeholder="Username" required />
+      <input id="wallet" placeholder="Wallet Address" required />
+      <input id="email" type="email" placeholder="Email" required />
+      <input id="password" type="password" placeholder="Password" required />
+      <button type="submit">Register</button>
+    </form>
+    <script src="/consent.js"></script>
+    <script>
+      async function hash(val) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(val));
+        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+      document.getElementById('reg').addEventListener('submit', async e => {
+        e.preventDefault();
+        const body = {
+          username: username.value,
+          walletAddress: wallet.value,
+          email: email.value,
+          passwordHash: await hash(password.value)
+        };
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (data.token) {
+          localStorage.setItem('token', data.token);
+          window.location = '/profile.html';
+        } else {
+          alert('Registration failed');
+        }
+      });
+    </script>
+  </body>
+</html>

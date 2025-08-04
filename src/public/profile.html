@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Profile</title>
+  </head>
+  <body>
+    <div id="data-consent">Мы обрабатываем данные. <button id="consent-ok">OK</button></div>
+    <h1>Profile</h1>
+    <form id="profile">
+      <input id="username" placeholder="Username" />
+      <input id="avatar" type="file" />
+      <textarea id="bio" placeholder="Bio"></textarea>
+      <button type="submit">Save</button>
+    </form>
+    <button id="delete">Delete Profile</button>
+    <a href="/change-password.html">Change Password</a>
+    <script src="/consent.js"></script>
+    <script>
+      const token = localStorage.getItem('token');
+      async function load() {
+        const res = await fetch('/api/users/me', {
+          headers: { Authorization: 'Bearer ' + token }
+        });
+        if (res.ok) {
+          const user = await res.json();
+          username.value = user.username || '';
+          bio.value = user.bio || '';
+        }
+      }
+      load();
+      document.getElementById('profile').addEventListener('submit', async e => {
+        e.preventDefault();
+        const fd = new FormData();
+        fd.append('username', username.value);
+        fd.append('bio', bio.value);
+        if (avatar.files[0]) fd.append('avatar', avatar.files[0]);
+        const res = await fetch('/api/users/me', {
+          method: 'PATCH',
+          headers: { Authorization: 'Bearer ' + token },
+          body: fd
+        });
+        if (res.ok) {
+          alert('Saved');
+        } else {
+          alert('Save failed');
+        }
+      });
+      document.getElementById('delete').addEventListener('click', async () => {
+        if (!confirm('Delete profile?')) return;
+        const res = await fetch('/api/users/me', {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer ' + token }
+        });
+        if (res.ok) {
+          localStorage.removeItem('token');
+          window.location = '/';
+        }
+      });
+    </script>
+  </body>
+</html>

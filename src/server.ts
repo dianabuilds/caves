@@ -11,6 +11,8 @@ import path from 'path';
 import fs from 'fs';
 import { Pool } from 'pg';
 import sgMail from '@sendgrid/mail';
+import { createClient } from 'redis';
+import archiver from 'archiver';
 
 dotenv.config();
 sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
@@ -34,17 +36,55 @@ pool.query(
     id SERIAL PRIMARY KEY,
     user_id TEXT,
     action TEXT,
-    created_at TIMESTAMPTZ DEFAULT now()
+    ip TEXT,
+    ua TEXT,
+    ts TIMESTAMPTZ DEFAULT now()
   )`
 );
 
-const logUserEvent = async (userId: string | null, action: string) => {
-  await pool.query('INSERT INTO user_events (user_id, action) VALUES ($1, $2)', [userId, action]);
+const logUserEvent = async (
+  req: Request,
+  userId: string | null,
+  action: string,
+) => {
+  const ip = req.ip;
+  const ua = req.headers['user-agent'] || '';
+  await pool.query(
+    'INSERT INTO user_events (user_id, action, ip, ua) VALUES ($1, $2, $3, $4)',
+    [userId, action, ip, ua],
+  );
 };
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
+
+const redis = createClient({ url: process.env.REDIS_URL });
+redis.connect().catch(() => {});
+
+const RATE_LIMIT = 20;
+const WINDOW_SECONDS = 15 * 60;
+
+const authRateLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  const ip = req.ip;
+  try {
+    const key = `rl:${ip}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, WINDOW_SECONDS);
+    if (count > RATE_LIMIT) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+  } catch {
+    // ignore redis errors
+  }
+  next();
+};
+
+app.use('/api/auth', authRateLimiter);
 
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -161,6 +201,28 @@ app.get('/api/auth/nonce', (_req: Request, res: Response) => {
   res.json({ nonce });
 });
 
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  const { walletAddress, username, passwordHash, email } = req.body;
+  if (typeof walletAddress !== 'string') {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  try {
+    const user = await payload.create({
+      collection: 'users',
+      data: { walletAddress, username, passwordHash, email },
+    });
+    const token = jwt.sign(
+      { address: walletAddress },
+      process.env.JWT_SECRET || 'jwt_secret',
+      { expiresIn: '15m' },
+    );
+    await logUserEvent(req, String(user.id), 'register');
+    res.json({ token, user: sanitizeUser(user, true) });
+  } catch {
+    res.status(400).json({ error: 'Registration failed' });
+  }
+});
+
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     const { message, signature } = req.body;
@@ -191,7 +253,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       { expiresIn: '15m' }
     );
     res.cookie('sid', sessionId, { httpOnly: true, secure: true, sameSite: 'lax' });
-    await logUserEvent(userId, 'login');
+    await logUserEvent(req, userId, 'login');
     res.json({ token });
   } catch (err) {
     res.status(400).json({ error: 'Invalid login' });
@@ -209,7 +271,7 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
         sids.delete(sid);
         if (!sids.size) userSessions.delete(session.userId);
       }
-      await logUserEvent(session.userId, 'logout');
+      await logUserEvent(req, session.userId, 'logout');
     }
     res.clearCookie('sid');
   }
@@ -232,7 +294,7 @@ app.post(
       id: req.user.id,
       data: { passwordHash: newHash },
     });
-    await logUserEvent(req.user.id, 'change_password');
+    await logUserEvent(req, req.user.id, 'change_password');
     res.status(204).send();
   },
 );
@@ -267,7 +329,7 @@ app.post('/api/auth/forgot', async (req: Request, res: Response) => {
       } catch {
         // ignore email errors
       }
-      await logUserEvent(userId, 'forgot_password');
+      await logUserEvent(req, userId, 'forgot_password');
     }
   } catch {
     // ignore lookup errors
@@ -292,7 +354,7 @@ app.post('/api/auth/reset', async (req: Request, res: Response) => {
     });
     passwordResetTokens.delete(token);
     invalidateUserSessions(entry.userId);
-    await logUserEvent(entry.userId, 'reset_password');
+    await logUserEvent(req, entry.userId, 'reset_password');
     res.status(204).send();
   } catch {
     res.status(400).json({ error: 'Invalid token' });
@@ -303,8 +365,29 @@ app.get(
   '/api/users/me',
   authenticate,
   async (req: AuthenticatedRequest, res: Response) => {
-    await logUserEvent(req.user.id, 'get_me');
+    await logUserEvent(req, req.user.id, 'get_me');
     res.json(sanitizeUser(req.user, true));
+  },
+);
+
+app.get(
+  '/api/users/me/export',
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    await logUserEvent(req, req.user.id, 'export_me');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="export.zip"');
+    const archive = archiver('zip');
+    archive.pipe(res);
+    const userData = sanitizeUser(req.user, true);
+    archive.append(JSON.stringify(userData, null, 2), { name: 'user.json' });
+    if (userData.avatar) {
+      const filePath = path.join(__dirname, '..', userData.avatar);
+      if (fs.existsSync(filePath)) {
+        archive.file(filePath, { name: path.basename(filePath) });
+      }
+    }
+    await archive.finalize();
   },
 );
 
@@ -332,7 +415,7 @@ app.patch(
       id: req.user.id,
       data: updates,
     });
-    await logUserEvent(req.user.id, 'patch_me');
+    await logUserEvent(req, req.user.id, 'patch_me');
     res.json(sanitizeUser(updated, true));
   },
 );
@@ -343,7 +426,7 @@ app.delete(
   async (req: AuthenticatedRequest, res: Response) => {
     await softDeleteUser(req.user.id);
     invalidateUserSessions(req.user.id);
-    await logUserEvent(req.user.id, 'delete_me');
+    await logUserEvent(req, req.user.id, 'delete_me');
     res.status(204).send();
   },
 );
@@ -358,7 +441,7 @@ app.get(
         id: req.params.id,
       });
       const isSelf = req.user && req.user.id === user.id;
-      await logUserEvent(req.user?.id || null, `get_user_${req.params.id}`);
+      await logUserEvent(req, req.user?.id || null, `get_user_${req.params.id}`);
       res.json(sanitizeUser(user, isSelf));
     } catch {
       res.status(404).json({ error: 'User not found' });

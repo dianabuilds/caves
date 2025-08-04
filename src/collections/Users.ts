@@ -1,4 +1,4 @@
-import type { CollectionConfig, FieldHook } from 'payload/types';
+import type { CollectionConfig, FieldHook } from 'payload';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 
@@ -8,22 +8,22 @@ const pool = new Pool({
 
 const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'default_secret';
 
-const encrypt: FieldHook = async ({ value }) => {
+const encrypt: FieldHook = async ({ value }: { value?: string }) => {
   if (typeof value !== 'string') return value;
   const res = await pool.query(
     "SELECT encode(pgp_sym_encrypt($1, $2), 'base64') AS enc",
     [value, ENCRYPTION_KEY],
   );
-  return res.rows[0]?.enc;
+  return res.rows[0]?.enc as string;
 };
 
-const decrypt: FieldHook = async ({ value }) => {
+const decrypt: FieldHook = async ({ value }: { value?: string }) => {
   if (typeof value !== 'string') return value;
   const res = await pool.query(
     "SELECT pgp_sym_decrypt(decode($1, 'base64'), $2) AS dec",
     [value, ENCRYPTION_KEY],
   );
-  return res.rows[0]?.dec;
+  return res.rows[0]?.dec as string;
 };
 
 const bcryptRegex = /^\$2[aby]\$\d{2}\$[./0-9A-Za-z]{53}$/;
@@ -48,8 +48,8 @@ const Users: CollectionConfig = {
       required: true,
       unique: true,
       index: true,
-      validate: (val) =>
-        /^0x[a-fA-F0-9]{40}$/.test(val)
+      validate: (val: unknown) =>
+        typeof val === 'string' && /^0x[a-fA-F0-9]{40}$/.test(val)
           ? true
           : 'Invalid wallet address format',
     },
@@ -59,8 +59,8 @@ const Users: CollectionConfig = {
       required: true,
       unique: true,
       index: true,
-      validate: (val) =>
-        /^\S+@\S+\.\S+$/.test(val)
+      validate: (val: unknown) =>
+        typeof val === 'string' && /^\S+@\S+\.\S+$/.test(val)
           ? true
           : 'Invalid email format',
       hooks: {
@@ -72,8 +72,9 @@ const Users: CollectionConfig = {
       name: 'passwordHash',
       type: 'text',
       required: true,
-      validate: (val) =>
-        bcryptRegex.test(val) || argon2idRegex.test(val)
+      validate: (val: unknown) =>
+        typeof val === 'string' &&
+        (bcryptRegex.test(val) || argon2idRegex.test(val))
           ? true
           : 'Password hash must be bcrypt or argon2id',
       hooks: {
@@ -87,7 +88,7 @@ const Users: CollectionConfig = {
       required: true,
       unique: true,
       index: true,
-      validate: (val) =>
+      validate: (val: unknown) =>
         typeof val === 'string' && val.length >= 3 && val.length <= 30
           ? true
           : 'Username must be 3-30 characters',

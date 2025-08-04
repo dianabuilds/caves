@@ -10,12 +10,24 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { Pool } from 'pg';
+import sgMail from '@sendgrid/mail';
 
 dotenv.config();
+sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
+
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'default_secret';
+
+const encryptValue = async (value: string): Promise<string> => {
+  const res = await pool.query(
+    "SELECT encode(pgp_sym_encrypt($1, $2), 'base64') AS enc",
+    [value, ENCRYPTION_KEY],
+  );
+  return res.rows[0]?.enc as string;
+};
 
 pool.query(
   `CREATE TABLE IF NOT EXISTS user_events (
@@ -110,7 +122,22 @@ const sanitizeUser = (user: any, isSelf: boolean) => {
 };
 
 const nonces = new Set<string>();
-const sessions = new Map<string, string>();
+const sessions = new Map<string, { refreshToken: string; userId: string }>();
+const userSessions = new Map<string, Set<string>>();
+const passwordResetTokens = new Map<
+  string,
+  { userId: string; expires: number }
+>();
+
+const invalidateUserSessions = (userId: string) => {
+  const sids = userSessions.get(userId);
+  if (sids) {
+    for (const sid of sids) {
+      sessions.delete(sid);
+    }
+    userSessions.delete(userId);
+  }
+};
 
 app.get('/api/auth/nonce', (_req: Request, res: Response) => {
   const nonce = randomBytes(16).toString('hex');
@@ -127,28 +154,133 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid nonce' });
     }
     nonces.delete(data.nonce);
+    const { docs } = await payload.find({
+      collection: 'users',
+      where: { walletAddress: { equals: data.address } },
+      limit: 1,
+    });
+    if (!docs.length) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    const user = docs[0];
+    const userId = String(user.id);
     const sessionId = randomBytes(16).toString('hex');
     const refreshToken = randomBytes(32).toString('hex');
-    sessions.set(sessionId, refreshToken);
+    sessions.set(sessionId, { refreshToken, userId });
+    if (!userSessions.has(userId)) userSessions.set(userId, new Set());
+    userSessions.get(userId)!.add(sessionId);
     const token = jwt.sign(
       { address: data.address },
       process.env.JWT_SECRET || 'jwt_secret',
       { expiresIn: '15m' }
     );
     res.cookie('sid', sessionId, { httpOnly: true, secure: true, sameSite: 'lax' });
+    await logUserEvent(userId, 'login');
     res.json({ token });
   } catch (err) {
     res.status(400).json({ error: 'Invalid login' });
   }
 });
 
-app.post('/api/auth/logout', (req: Request, res: Response) => {
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
   const sid = req.cookies?.sid as string | undefined;
   if (sid) {
-    sessions.delete(sid);
+    const session = sessions.get(sid);
+    if (session) {
+      sessions.delete(sid);
+      const sids = userSessions.get(session.userId);
+      if (sids) {
+        sids.delete(sid);
+        if (!sids.size) userSessions.delete(session.userId);
+      }
+      await logUserEvent(session.userId, 'logout');
+    }
     res.clearCookie('sid');
   }
   res.status(204).send();
+});
+
+app.post(
+  '/api/auth/change-password',
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const { currentHash, newHash } = req.body;
+    if (typeof currentHash !== 'string' || typeof newHash !== 'string') {
+      return res.status(400).json({ error: 'Invalid request' });
+    }
+    if (req.user.passwordHash !== currentHash) {
+      return res.status(400).json({ error: 'Incorrect password' });
+    }
+    await payload.update({
+      collection: 'users',
+      id: req.user.id,
+      data: { passwordHash: newHash },
+    });
+    await logUserEvent(req.user.id, 'change_password');
+    res.status(204).send();
+  },
+);
+
+app.post('/api/auth/forgot', async (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (typeof email !== 'string') {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  try {
+    const encryptedEmail = await encryptValue(email);
+    const { docs } = await payload.find({
+      collection: 'users',
+      where: { email: { equals: encryptedEmail } },
+      limit: 1,
+    });
+    if (docs.length) {
+      const user = docs[0];
+      const userId = String(user.id);
+      const token = randomBytes(32).toString('hex');
+      passwordResetTokens.set(token, {
+        userId,
+        expires: Date.now() + 3600_000,
+      });
+      try {
+        await sgMail.send({
+          to: user.email,
+          from: process.env.SENDGRID_FROM || 'no-reply@example.com',
+          subject: 'Password Reset',
+          text: `Your reset token: ${token}`,
+        });
+      } catch {
+        // ignore email errors
+      }
+      await logUserEvent(userId, 'forgot_password');
+    }
+  } catch {
+    // ignore lookup errors
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/reset', async (req: Request, res: Response) => {
+  const { token, newHash } = req.body;
+  if (typeof token !== 'string' || typeof newHash !== 'string') {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  const entry = passwordResetTokens.get(token);
+  if (!entry || entry.expires < Date.now()) {
+    return res.status(400).json({ error: 'Invalid token' });
+  }
+  try {
+    await payload.update({
+      collection: 'users',
+      id: entry.userId,
+      data: { passwordHash: newHash },
+    });
+    passwordResetTokens.delete(token);
+    invalidateUserSessions(entry.userId);
+    await logUserEvent(entry.userId, 'reset_password');
+    res.status(204).send();
+  } catch {
+    res.status(400).json({ error: 'Invalid token' });
+  }
 });
 
 app.get(

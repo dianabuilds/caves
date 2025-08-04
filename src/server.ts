@@ -139,6 +139,22 @@ const invalidateUserSessions = (userId: string) => {
   }
 };
 
+const softDeleteUser = async (userId: string) => {
+  await payload.update({
+    collection: 'users',
+    id: userId,
+    data: {
+      deletedAt: new Date().toISOString(),
+      email: null,
+      passwordHash: null,
+      settings: null,
+      role: null,
+      premiumTier: null,
+      subscriptionUntil: null,
+    },
+  });
+};
+
 app.get('/api/auth/nonce', (_req: Request, res: Response) => {
   const nonce = randomBytes(16).toString('hex');
   nonces.add(nonce);
@@ -318,6 +334,17 @@ app.patch(
     });
     await logUserEvent(req.user.id, 'patch_me');
     res.json(sanitizeUser(updated, true));
+  },
+);
+
+app.delete(
+  '/api/users/me',
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    await softDeleteUser(req.user.id);
+    invalidateUserSessions(req.user.id);
+    await logUserEvent(req.user.id, 'delete_me');
+    res.status(204).send();
   },
 );
 
